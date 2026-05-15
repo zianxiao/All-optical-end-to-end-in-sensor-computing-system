@@ -8,7 +8,7 @@ Authors: Zian Xiao, Zhihao Ren, Yangyang Zhuge, Zixuan Zhang, Yan Yang, Bowei Do
 
 
 <p align="center">
-  <img src="fig.jpg" width="800">
+  <img src="Figure1.jpg" width="800">
 </p>
 
 ## Abstract
