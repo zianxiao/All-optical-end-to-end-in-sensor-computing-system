@@ -37,8 +37,7 @@ These results establish a compact, low-redundancy, and energy-efficient paradigm
 
 ```text
 .
-├── Data/             # Raw and processed data used in the manuscript
-├── Code/             # Data-processing, plotting, and machine-learning scripts
-├── Figures/          # Representative or reproduced figures
+├── Figures-raw data/             # Raw data used in the manuscript
+├── Figures-tiff/          # Figures in the manuscript
 ├── README.md         # Description of this repository
 └── LICENSE           # License information
