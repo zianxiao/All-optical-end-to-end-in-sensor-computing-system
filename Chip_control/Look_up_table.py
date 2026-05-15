@@ -19,12 +19,11 @@ class MCPSEND(Structure):
 
 
 def _bytes_from_send(pkt: MCPSEND) -> bytes:
-    """把 MCPSEND 结构体稳定地转成 bytes 以便 UDP 发送。"""
     return ctypes.string_at(addressof(pkt), sizeof(pkt))
 
 
 # ----------------------------
-# NI-9215: read 5 samples mean (你的验证版本)
+# NI-9215: read 5 samples mean
 # ----------------------------
 def ni9215_read_5pt_mean(ni_physical_ch: str) -> float:
     with nidaqmx.Task() as task:
@@ -52,8 +51,8 @@ def sweep_0_to_0p5V_and_log(
     dll_path=r".\MCP.dll",
     dac_ip="169.254.1.10",
     dac_port=1234,
-    dac_channel=40,            # 你说的 channel
-    dac_cfg_param=16.284,      # 你代码里第三个参数
+    dac_channel=40,           
+    dac_cfg_param=16.284,     
     v_start=0.0,
     v_stop=0.5,
     v_step=0.01,
@@ -85,7 +84,6 @@ def sweep_0_to_0p5V_and_log(
         writer.writerow([ "v_set_V", "ni_mean_V"])
 
         try:
-            # (可选) 先把该通道置 0V 一次，类似你原来的初始化
             pkt0 = lib.makeSetProtocol(dac_channel, 0.0, float(dac_cfg_param))
             sock.sendto(_bytes_from_send(pkt0), addr)
             time.sleep(0.01)
@@ -110,7 +108,17 @@ def sweep_0_to_0p5V_and_log(
 
         finally:
 
-            # 结束复位：把 DAC 拉回 0V（推荐）
+            try:
+
+                # 结束时复位到 0V
+
+                pkt_reset = lib.makeSetProtocol(dac_channel, 0.0, float(dac_cfg_param))
+
+                sock.sendto(_bytes_from_send(pkt_reset), addr)
+
+                time.sleep(0.02)
+
+                print("DAC reset to 0V.")
 
             try:
 
@@ -133,16 +141,14 @@ def sweep_0_to_0p5V_and_log(
 
 if __name__ == "__main__":
     sweep_0_to_0p5V_and_log(
-        # 你已验证正确的 NI 通道
+
         ni_physical_ch="cDAQ9185-2395476Mod1/ai0",
 
-        # 扫描参数（你可改步长、稳定等待时间）
         v_start=0.0,
         v_stop=1,
         v_step=0.005,
         settle_s=0.01,
 
-        # 输出 CSV
         out_csv="balanced_1V_ch39_155540.csv",
 
         # DAC 通道与配置
