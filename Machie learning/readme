@@ -1,1 +1,18 @@
+Please first download the dataset and place it in the repository root directory.
 
+Each subfolder corresponds to one mixture class, and each .csv file contains one spectral sample.
+
+Usage
+1. Generate labels
+Run:python label_generate.py
+
+This will generate:EAI_label.csv
+
+The label file contains the sample information, class index, and the corresponding ethanol, acetone, and IPA concentrations.
+
+2. Train the neural network
+
+Run:python ml_pc.py
+
+The script trains a 1D CNN classifier for liquid-mixture classification. The network consists of one 4 × 4 convolution layer followed by three fully connected layers.
+The training results, including the trained model, training history, classification report, prediction results, and confusion matrix, will be saved automatically.
