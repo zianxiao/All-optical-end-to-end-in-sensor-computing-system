@@ -1,3 +1,301 @@
+import os
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+from torch.utils.data import Dataset, DataLoader, Subset
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+
+
+# ------------------ Configuration ------------------
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Device:", device)
+
+batch_size = 32
+learning_rate = 1e-3
+num_epochs = 120
+random_seed = 42
+input_length = 40
+
+
+# ------------------ Dataset ------------------
+class EAIDataset(Dataset):
+    """Dataset for loading 40-point signal samples and classification labels."""
+
+    def __init__(self, dataset_dir, csv_path):
+        self.dataset_dir = dataset_dir
+        self.csv_path = csv_path
+        self.df = pd.read_csv(csv_path, encoding="utf-8")
+
+        # Encode labels as consecutive class indices: 0, 1, 2, ...
+        unique_labels = sorted(self.df["label"].unique())
+        self.label_to_index = {label: idx for idx, label in enumerate(unique_labels)}
+        self.index_to_label = {idx: label for label, idx in self.label_to_index.items()}
+        self.df["label_index"] = self.df["label"].map(self.label_to_index)
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        file_path = self.df.loc[idx, "filepath"]
+        label = self.df.loc[idx, "label_index"]
+
+        signal = pd.read_csv(file_path, header=None).to_numpy(dtype=np.float32)
+
+        # Force each sample to be a 40-point 1D signal.
+        # Output shape: (40, 1), where 40 is the sequence length and 1 is the channel number.
+        signal = signal.reshape(-1)
+
+        if signal.shape[0] != input_length:
+            raise ValueError(
+                f"Expected {input_length} data points, but got {signal.shape[0]} points from {file_path}"
+            )
+
+        signal = torch.from_numpy(signal).float().view(input_length, 1)
+
+        # Sample-wise z-score normalization.
+        mean = signal.mean(dim=0, keepdim=True)
+        std = signal.std(dim=0, keepdim=True).clamp_min(1e-6)
+        signal = (signal - mean) / std
+
+        label = torch.tensor(int(label), dtype=torch.long)
+        return signal, label
+
+
+# ------------------ Model ------------------
+class CNNFCClassifier(nn.Module):
+
+    def __init__(self, num_classes):
+        super().__init__()
+
+        # First layer: CNN.
+        self.conv1 = nn.Conv1d(
+            in_channels=1,
+            out_channels=8,
+            kernel_size=4,
+            stride=1,
+            padding=1,
+        )
+
+        # Batch normalization after the CNN layer.
+        self.bn1 = nn.BatchNorm1d(8)
+
+        # Conv1d output length:
+        # input length = 40, kernel size = 4, padding = 1, stride = 1
+        # output length = 39
+        conv_output_length = 39
+        flattened_dim = 8 * conv_output_length
+
+        # Remaining learnable layers: fully connected layers.
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(flattened_dim, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Dropout(p=0.2),
+
+            nn.Linear(128, 64),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+
+            nn.Linear(64, num_classes),
+        )
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = torch.relu(x)
+        x = self.classifier(x)
+        return x
+
+
+def build_data_loaders(dataset, batch_size=32, test_size=0.3, random_seed=42):
+    """Create stratified train/test data loaders."""
+    labels = dataset.df["label_index"].to_numpy()
+    indices = np.arange(len(dataset))
+
+    train_idx, test_idx = train_test_split(
+        indices,
+        test_size=test_size,
+        random_state=random_seed,
+        stratify=labels,
+    )
+
+    train_ds = Subset(dataset, train_idx)
+    test_ds = Subset(dataset, test_idx)
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
+
+    return train_loader, test_loader, train_idx, test_idx
+
+
+def run_one_epoch(model, data_loader, criterion, optimizer=None):
+    """Run one training or evaluation epoch."""
+    is_training = optimizer is not None
+    model.train() if is_training else model.eval()
+
+    total_loss = 0.0
+    all_labels = []
+    all_preds = []
+
+    context = torch.enable_grad() if is_training else torch.no_grad()
+
+    with context:
+        for inputs, labels in data_loader:
+            # Original sample shape: (batch_size, 40, 1).
+            # Conv1d requires shape: (batch_size, 1, 40).
+            inputs = inputs.float().permute(0, 2, 1).to(device)
+            labels = labels.to(device)
+
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+
+            if is_training:
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+            total_loss += loss.item()
+
+            preds = torch.argmax(outputs, dim=1)
+            all_labels.extend(labels.cpu().tolist())
+            all_preds.extend(preds.cpu().tolist())
+
+    avg_loss = total_loss / len(data_loader)
+    accuracy = accuracy_score(all_labels, all_preds) * 100
+
+    return avg_loss, accuracy
+
+
+# ------------------ Main Script ------------------
+torch.manual_seed(random_seed)
+np.random.seed(random_seed)
+
+data_ds = EAIDataset("./processed_dataset", "./EAI_label.csv")
+
+num_classes = len(data_ds.label_to_index)
+print(f"Number of samples: {len(data_ds)}")
+print(f"Number of classes: {num_classes}")
+print("Class distribution:")
+print(data_ds.df["label_index"].value_counts().sort_index())
+
+train_loader, test_loader, train_idx, test_idx = build_data_loaders(
+    data_ds,
+    batch_size=batch_size,
+    test_size=0.3,
+    random_seed=random_seed,
+)
+
+print(f"Training samples: {len(train_loader.dataset)}")
+print(f"Test samples: {len(test_loader.dataset)}")
+
+sample_x, _ = data_ds[0]
+print(f"Sample shape before permute: {sample_x.shape}")
+print("Model input shape after permute: (batch_size, 1, 40)")
+
+model = CNNFCClassifier(num_classes=num_classes).to(device)
+
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer,
+    mode="min",
+    factor=0.5,
+    patience=10,
+)
+
+train_losses = []
+test_losses = []
+train_accuracies = []
+test_accuracies = []
+
+best_test_acc = 0.0
+best_model_path = "best_cnn_fc_bn_classifier.pt"
+
+for epoch in range(num_epochs):
+    train_loss, train_acc = run_one_epoch(
+        model=model,
+        data_loader=train_loader,
+        criterion=criterion,
+        optimizer=optimizer,
+    )
+
+    test_loss, test_acc = run_one_epoch(
+        model=model,
+        data_loader=test_loader,
+        criterion=criterion,
+        optimizer=None,
+    )
+
+    scheduler.step(test_loss)
+
+    train_losses.append(train_loss)
+    test_losses.append(test_loss)
+    train_accuracies.append(train_acc)
+    test_accuracies.append(test_acc)
+
+    if test_acc > best_test_acc:
+        best_test_acc = test_acc
+        torch.save(model.state_dict(), best_model_path)
+
+    current_lr = optimizer.param_groups[0]["lr"]
+
+    print(
+        f"Epoch {epoch + 1:03d}: "
+        f"Train Loss={train_loss:.4f}, "
+        f"Train Acc={train_acc:.2f}%, "
+        f"Test Loss={test_loss:.4f}, "
+        f"Test Acc={test_acc:.2f}%, "
+        f"LR={current_lr:.2e}"
+    )
+
+
+# ------------------ Plot Loss and Accuracy Curves ------------------
+plt.figure()
+plt.plot(train_losses, label="Train Loss")
+plt.plot(test_losses, label="Test Loss")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.legend()
+plt.grid(True)
+plt.title("Loss Curve")
+plt.show()
+
+plt.figure()
+plt.plot(train_accuracies, label="Train Accuracy")
+plt.plot(test_accuracies, label="Test Accuracy")
+plt.xlabel("Epoch")
+plt.ylabel("Accuracy (%)")
+plt.legend()
+plt.grid(True)
+plt.title("Accuracy Curve")
+plt.show()
+
+
+# ------------------ Save Metrics ------------------
+os.makedirs("./loss", exist_ok=True)
+
+results_df = pd.DataFrame({
+    "epoch": list(range(1, len(test_losses) + 1)),
+    "train_loss": train_losses,
+    "test_loss": test_losses,
+    "train_accuracy": train_accuracies,
+    "test_accuracy": test_accuracies,
+})
+
+results_path = "./loss/test_metrics1.csv"
+results_df.to_csv(results_path, index=False, encoding="utf-8")
+
+print(f"Best test accuracy: {best_test_acc:.2f}%")
+print(f"Best model saved to: {best_model_path}")
+print(f"Training metrics saved to: {results_path}")
 import argparse
 import json
 import random
